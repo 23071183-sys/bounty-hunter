@@ -35,10 +35,25 @@ export interface Bounty {
   /** Risk flags detected by the adapter itself (e.g. honeypot CONTRIBUTING.md). */
   sourceFlags?: string[];
 
-  /** Contention: how many others have already attempted this. */
+  /** Contention: how many others have already attempted this. -1 = unknown (fetch failed). */
   attempts?: number;
   /** Whether someone has already claimed it / opened a PR. */
   claimed?: boolean;
+
+  /** Repo credibility signals (transient, set by adapter; used by the judge). */
+  repoStars?: number;
+  repoFork?: boolean;
+  repoPushedAt?: string | null;
+}
+
+export type QualityTier = "strong" | "fair" | "weak" | "avoid";
+
+/** Output of the automated bounty judge. */
+export interface JudgeResult {
+  tier: QualityTier;
+  /** 0..1 credibility/quality score. */
+  score: number;
+  reasons: string[];
 }
 
 /** A bounty plus its computed score. */
@@ -47,6 +62,8 @@ export interface ScoredBounty extends Bounty {
   scoreBreakdown: ScoreBreakdown;
   /** Honeypot/prompt-injection flags from the safety scanner. */
   riskFlags: string[];
+  /** Automated quality/credibility verdict. */
+  quality: JudgeResult;
   /** Local lifecycle state the user drives. */
   state: LocalState;
   firstSeen: string;

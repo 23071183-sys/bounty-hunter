@@ -91,6 +91,8 @@ interface AlgoraInfo {
   awarded: boolean;
   attempts: number;
   claimed: boolean;
+  /** False when the comment fetch failed — contention is UNKNOWN, not zero. */
+  fetched: boolean;
 }
 
 /**
@@ -100,47 +102,70 @@ interface AlgoraInfo {
  * a bounty is realistically winnable.
  */
 async function fetchAlgora(repo: string, number: number): Promise<AlgoraInfo> {
-  try {
-    const { stdout } = await exec(
-      "gh",
-      ["api", "-X", "GET", `repos/${repo}/issues/${number}/comments`, "-F", "per_page=100"],
-      { maxBuffer: 10 * 1024 * 1024 },
-    );
-    const comments = JSON.parse(stdout) as GhComment[];
-    let amount: number | null = null;
-    let awarded = false;
-    const attempters = new Set<string>();
-    let claimed = false;
-    for (const c of comments) {
-      const body = c.body ?? "";
-      const who = c.user?.login ?? "?";
-      if (/has been awarded|🎉.*awarded|awarded \*\*\$/i.test(body)) awarded = true;
-      if (/(^|\s)\/attempt\b/i.test(body) && !/algora-pbc/i.test(who)) attempters.add(who);
-      if (/(^|\s)\/claim\b|submitted (a )?pull request|claims the bounty|\bPR #\d+/i.test(body)) {
-        claimed = true;
+  // Retry transient gh failures: a silent failure here would mark a contested
+  // bounty as "uncontested", which is the worst possible false positive.
+  for (let tryNo = 0; tryNo < 2; tryNo++) {
+    try {
+      const { stdout } = await exec(
+        "gh",
+        ["api", "-X", "GET", `repos/${repo}/issues/${number}/comments`, "-F", "per_page=100"],
+        { maxBuffer: 10 * 1024 * 1024 },
+      );
+      const comments = JSON.parse(stdout) as GhComment[];
+      let amount: number | null = null;
+      let awarded = false;
+      const attempters = new Set<string>();
+      let claimed = false;
+      for (const c of comments) {
+        const body = c.body ?? "";
+        const who = c.user?.login ?? "?";
+        if (/has been awarded|🎉.*awarded|awarded \*\*\$/i.test(body)) awarded = true;
+        if (/(^|\s)\/attempt\b/i.test(body) && !/algora-pbc/i.test(who)) attempters.add(who);
+        if (/(^|\s)\/claim\b|submitted (a )?pull request|claims the bounty|\bPR #\d+/i.test(body)) {
+          claimed = true;
+        }
+        // Prefer the bot's canonical "💎 $X bounty" line; fall back to /bounty $X.
+        const diamond = body.match(/💎\s*\$\s?([\d,]+(?:\.\d+)?)\s?(k|K)?\s*bounty/i);
+        const cmd = body.match(/\/bounty\s+\$\s?([\d,]+(?:\.\d+)?)\s?(k|K)?/i);
+        const hit = diamond ?? cmd;
+        if (hit) {
+          let n = Number(hit[1].replace(/,/g, ""));
+          if (hit[2]) n *= 1000;
+          if (Number.isFinite(n) && (amount == null || n > amount)) amount = n;
+        }
       }
-      // Prefer the bot's canonical "💎 $X bounty" line; fall back to /bounty $X.
-      const diamond = body.match(/💎\s*\$\s?([\d,]+(?:\.\d+)?)\s?(k|K)?\s*bounty/i);
-      const cmd = body.match(/\/bounty\s+\$\s?([\d,]+(?:\.\d+)?)\s?(k|K)?/i);
-      const hit = diamond ?? cmd;
-      if (hit) {
-        let n = Number(hit[1].replace(/,/g, ""));
-        if (hit[2]) n *= 1000;
-        if (Number.isFinite(n) && (amount == null || n > amount)) amount = n;
-      }
+      return { amount, awarded, attempts: attempters.size, claimed, fetched: true };
+    } catch {
+      // Fall through to retry; on final failure, report contention as UNKNOWN.
     }
-    return { amount, awarded, attempts: attempters.size, claimed };
-  } catch {
-    return { amount: null, awarded: false, attempts: 0, claimed: false };
   }
+  return { amount: null, awarded: false, attempts: 0, claimed: false, fetched: false };
+}
+
+export interface RepoMeta {
+  flags: string[];
+  stars: number;
+  fork: boolean;
+  pushedAt: string | null;
 }
 
 /**
- * Detect repo-level honeypots: many trap repos plant "humans not allowed /
- * autonomous AI agents only / research project / will not be merged" language
- * (plus injection) in CONTRIBUTING.md rather than the issue itself.
+ * Per-repo credibility + honeypot signals. Combines:
+ *  - repo metadata (stars, fork, last push) → payer reputation / activity
+ *  - CONTRIBUTING.md scan → repo-level honeypot ("humans not allowed", etc.)
+ * Many trap repos plant the honeypot in CONTRIBUTING rather than the issue.
  */
-async function fetchRepoFlags(repo: string): Promise<string[]> {
+async function fetchRepoMeta(repo: string): Promise<RepoMeta> {
+  const meta: RepoMeta = { flags: [], stars: 0, fork: false, pushedAt: null };
+  try {
+    const { stdout } = await exec("gh", ["api", `repos/${repo}`], { maxBuffer: 10 * 1024 * 1024 });
+    const r = JSON.parse(stdout) as { stargazers_count?: number; fork?: boolean; pushed_at?: string };
+    meta.stars = r.stargazers_count ?? 0;
+    meta.fork = Boolean(r.fork);
+    meta.pushedAt = r.pushed_at ?? null;
+  } catch {
+    // Repo metadata unavailable — leave defaults.
+  }
   for (const path of ["CONTRIBUTING.md", ".github/CONTRIBUTING.md"]) {
     try {
       const { stdout } = await exec(
@@ -151,13 +176,13 @@ async function fetchRepoFlags(repo: string): Promise<string[]> {
       const j = JSON.parse(stdout) as { content?: string };
       if (!j.content) continue;
       const txt = Buffer.from(j.content, "base64").toString("utf8");
-      if (scanBounty(txt).critical) return ["honeypot repo (CONTRIBUTING.md)"];
-      return [];
+      if (scanBounty(txt).critical) meta.flags = ["honeypot repo (CONTRIBUTING.md)"];
+      break;
     } catch {
       // File not found at this path — try the next.
     }
   }
-  return [];
+  return meta;
 }
 
 async function runQuery(q: string, page: number): Promise<GhIssue[]> {
@@ -216,17 +241,17 @@ export const githubAdapter: PlatformAdapter = {
       return { it, repo, algora };
     });
     for (let k = MAX_ENRICH; k < candidates.length; k++) {
-      enriched.push({ ...candidates[k], algora: { amount: null, awarded: false, attempts: 0, claimed: false } });
+      enriched.push({ ...candidates[k], algora: { amount: null, awarded: false, attempts: 0, claimed: false, fetched: false } });
     }
 
-    // 2b) Repo-level honeypot detection (CONTRIBUTING.md), one lookup per repo.
+    // 2b) Per-repo credibility + honeypot signals, one lookup per repo.
     const liveRepos = [...new Set(enriched.filter((e) => !e.algora.awarded).map((e) => e.repo))];
-    const repoFlagPairs = await mapLimit(
+    const repoMetaPairs = await mapLimit(
       liveRepos,
       ENRICH_CONCURRENCY,
-      async (repo) => [repo, await fetchRepoFlags(repo)] as const,
+      async (repo) => [repo, await fetchRepoMeta(repo)] as const,
     );
-    const repoFlags = new Map(repoFlagPairs);
+    const repoMetaMap = new Map(repoMetaPairs);
 
     // 3) Drop already-awarded bounties; map + per-repo cap.
     const perRepo = new Map<string, number>();
@@ -241,6 +266,7 @@ export const githubAdapter: PlatformAdapter = {
       const body = (it.body ?? "").slice(0, 4000);
       const reward = algora.amount ?? parseDollar(`${it.title} ${labels.join(" ")} ${body}`);
       const tags = [...labels, repo.split("/")[0]].filter(Boolean);
+      const meta = repoMetaMap.get(repo) ?? { flags: [], stars: 0, fork: false, pushedAt: null };
       out.push({
         id: makeId("github", `${repo}#${it.number}`),
         platform: "github",
@@ -257,9 +283,13 @@ export const githubAdapter: PlatformAdapter = {
         status: "open",
         createdAt: it.created_at,
         raw: { ...it, algora },
-        sourceFlags: repoFlags.get(repo) ?? [],
-        attempts: algora.attempts,
-        claimed: algora.claimed,
+        sourceFlags: meta.flags,
+        // -1 = contention unknown (comment fetch failed); never treated as "uncontested".
+        attempts: algora.fetched ? algora.attempts : -1,
+        claimed: algora.fetched ? algora.claimed : false,
+        repoStars: meta.stars,
+        repoFork: meta.fork,
+        repoPushedAt: meta.pushedAt,
       });
     }
     return out;

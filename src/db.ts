@@ -2,7 +2,18 @@ import { DatabaseSync } from "node:sqlite";
 import { mkdirSync } from "node:fs";
 import { join } from "node:path";
 import { ROOT } from "./config.js";
-import type { Bounty, LocalState, ScoredBounty, ScoreBreakdown } from "./types.js";
+import type { Bounty, JudgeResult, LocalState, ScoredBounty, ScoreBreakdown } from "./types.js";
+
+const DEFAULT_QUALITY: JudgeResult = { tier: "fair", score: 0.5, reasons: [] };
+
+function parseQuality(raw: string | null): JudgeResult {
+  try {
+    const q = JSON.parse(raw ?? "{}") as Partial<JudgeResult>;
+    return q && q.tier ? (q as JudgeResult) : DEFAULT_QUALITY;
+  } catch {
+    return DEFAULT_QUALITY;
+  }
+}
 
 const DATA_DIR = join(ROOT, "data");
 mkdirSync(DATA_DIR, { recursive: true });
@@ -44,6 +55,7 @@ const hasCol = (n: string) => existingCols.some((c) => c.name === n);
 if (!hasCol("risk_flags")) db.exec("ALTER TABLE bounties ADD COLUMN risk_flags TEXT NOT NULL DEFAULT '[]'");
 if (!hasCol("attempts")) db.exec("ALTER TABLE bounties ADD COLUMN attempts INTEGER NOT NULL DEFAULT 0");
 if (!hasCol("claimed")) db.exec("ALTER TABLE bounties ADD COLUMN claimed INTEGER NOT NULL DEFAULT 0");
+if (!hasCol("quality")) db.exec("ALTER TABLE bounties ADD COLUMN quality TEXT NOT NULL DEFAULT '{}'");
 
 interface Row {
   id: string;
@@ -69,6 +81,7 @@ interface Row {
   risk_flags: string;
   attempts: number;
   claimed: number;
+  quality: string;
 }
 
 function rowToScored(r: Row): ScoredBounty {
@@ -96,6 +109,7 @@ function rowToScored(r: Row): ScoredBounty {
     riskFlags: JSON.parse(r.risk_flags ?? "[]"),
     attempts: r.attempts ?? 0,
     claimed: Boolean(r.claimed),
+    quality: parseQuality(r.quality),
   };
 }
 
@@ -104,12 +118,12 @@ const upsertStmt = db.prepare(`
     id, platform, native_id, title, description, url,
     reward_amount, reward_currency, reward_usd, tags, skills,
     deadline, status, created_at, raw, score, score_breakdown,
-    state, first_seen, last_seen, risk_flags, attempts, claimed
+    state, first_seen, last_seen, risk_flags, attempts, claimed, quality
   ) VALUES (
     @id, @platform, @native_id, @title, @description, @url,
     @reward_amount, @reward_currency, @reward_usd, @tags, @skills,
     @deadline, @status, @created_at, @raw, @score, @score_breakdown,
-    'new', @now, @now, @risk_flags, @attempts, @claimed
+    'new', @now, @now, @risk_flags, @attempts, @claimed, @quality
   )
   ON CONFLICT(id) DO UPDATE SET
     title=excluded.title,
@@ -129,7 +143,8 @@ const upsertStmt = db.prepare(`
     last_seen=excluded.last_seen,
     risk_flags=excluded.risk_flags,
     attempts=excluded.attempts,
-    claimed=excluded.claimed
+    claimed=excluded.claimed,
+    quality=excluded.quality
 `);
 
 export interface UpsertResult {
@@ -139,7 +154,9 @@ export interface UpsertResult {
 
 /** Insert new bounties / refresh existing ones. Returns counts. */
 export function upsertBounties(
-  scored: Array<Bounty & { score: number; scoreBreakdown: ScoreBreakdown; riskFlags: string[] }>,
+  scored: Array<
+    Bounty & { score: number; scoreBreakdown: ScoreBreakdown; riskFlags: string[]; quality: JudgeResult }
+  >,
 ): UpsertResult {
   const boolToInt = (v: boolean | undefined) => (v ? 1 : 0);
   const now = new Date().toISOString();
@@ -172,6 +189,7 @@ export function upsertBounties(
         risk_flags: JSON.stringify(b.riskFlags),
         attempts: b.attempts ?? 0,
         claimed: boolToInt(b.claimed),
+        quality: JSON.stringify(b.quality),
       });
       if (existed) updated++;
       else inserted++;

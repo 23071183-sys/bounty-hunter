@@ -3,6 +3,7 @@ import { loadEnv, loadProfile } from "./config.js";
 import { discoverAll } from "./platforms/index.js";
 import { scoreBounty } from "./scoring.js";
 import { scanBounty } from "./safety.js";
+import { judgeBounty, medianReward } from "./judge.js";
 import {
   counts,
   getBounty,
@@ -52,13 +53,17 @@ async function cmdDiscover(flags: Record<string, string | boolean>) {
   console.log(demo ? "Discovering (demo fixtures)…" : "Discovering live bounties…");
   const { byPlatform, bounties } = await discoverAll({ env, offline }, { only, demo });
 
+  const median = medianReward(bounties);
   const scored = bounties.map((b) => {
     const { score, breakdown } = scoreBounty(b, profile);
     const safety = scanBounty(`${b.title}\n${b.description}`);
     const sourceFlags = b.sourceFlags ?? [];
     const riskFlags = [...safety.flags, ...sourceFlags];
     const critical = safety.critical || sourceFlags.length > 0;
-    return { ...b, score, scoreBreakdown: breakdown, riskFlags, _critical: critical };
+    const quality = judgeBounty({ ...b, riskFlags }, { medianRewardUsd: median });
+    // Fold credibility/quality into the final score (×0.6 … ×1.1).
+    const adjScore = Math.round(score * (0.6 + 0.5 * quality.score) * 100) / 100;
+    return { ...b, score: adjScore, scoreBreakdown: breakdown, riskFlags, quality, _critical: critical };
   });
   const { inserted, updated } = upsertBounties(scored);
 
@@ -94,6 +99,7 @@ function fmtUsd(usd: number | null): string {
 
 function fmtContention(b: { claimed?: boolean; attempts?: number }): string {
   if (b.claimed) return "  🔒 claimed/PR up";
+  if (b.attempts != null && b.attempts < 0) return "  ❓ contention unknown (recheck)";
   if (b.attempts && b.attempts > 0) return `  🏃 ${b.attempts} attempt${b.attempts > 1 ? "s" : ""}`;
   return "  ✅ uncontested";
 }
@@ -144,6 +150,7 @@ function cmdFresh(flags: Record<string, string | boolean>) {
   // bounties first seen in the latest discovery run (never re-seen since).
   const rows = listBounties({ state: "new", safeOnly: true, uncontestedOnly: true, limit: 200 })
     .filter((b) => b.scoreBreakdown.matchedSkills.length > 0)
+    .filter((b) => b.quality.tier !== "avoid")
     .filter((b) => !newOnly || b.firstSeen === b.lastSeen)
     .slice(0, limit);
 
@@ -153,12 +160,13 @@ function cmdFresh(flags: Record<string, string | boolean>) {
     return;
   }
   console.log("🎯 FRESH & WINNABLE — new, uncontested, no traps, in your stack:\n");
-  console.log(`${"SCORE".padStart(5)}  ${"REWARD".padStart(7)}  ${"PLATFORM".padEnd(10)}  TITLE`);
-  console.log("-".repeat(90));
+  console.log(`${"SCORE".padStart(5)}  ${"REWARD".padStart(7)}  ${"VERDICT".padEnd(7)}  ${"PLATFORM".padEnd(10)}  TITLE`);
+  console.log("-".repeat(95));
   for (const b of rows) {
-    const title = b.title.length > 52 ? `${b.title.slice(0, 51)}…` : b.title;
-    console.log(`${b.score.toFixed(0).padStart(5)}  ${fmtUsd(b.rewardUsd)}  ${b.platform.padEnd(10)}  ${title}`);
+    const title = b.title.length > 50 ? `${b.title.slice(0, 49)}…` : b.title;
+    console.log(`${b.score.toFixed(0).padStart(5)}  ${fmtUsd(b.rewardUsd)}  ${b.quality.tier.padEnd(7)}  ${b.platform.padEnd(10)}  ${title}`);
     console.log(`${" ".repeat(7)}${b.id}  [${b.scoreBreakdown.matchedSkills.slice(0, 5).join(", ")}]`);
+    console.log(`${" ".repeat(7)}↳ ${b.quality.reasons.slice(0, 4).join("; ")}`);
   }
   console.log(`\n${rows.length} winnable. Act fast: \`build <id>\` before the swarm arrives.`);
 }
@@ -177,6 +185,7 @@ function cmdShow(positional: string[]) {
   console.log(`reward:    ${b.rewardAmount ?? "?"} ${b.rewardCurrency ?? ""} (~${b.rewardUsd != null ? `$${b.rewardUsd}` : "?"})`);
   console.log(`deadline:  ${b.deadline ?? "—"} (${fmtDeadline(b.deadline)})`);
   console.log(`state:     ${b.state}`);
+  console.log(`verdict:   ${b.quality.tier.toUpperCase()} (${b.quality.score}) — ${b.quality.reasons.join("; ")}`);
   console.log(`contention:${fmtContention(b)}`);
   if (b.riskFlags.length) console.log(`🚨 RISK:    ${b.riskFlags.join(", ")} — likely a honeypot/injection trap; do NOT build`);
   console.log(`score:     ${b.score}`);
