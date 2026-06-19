@@ -4,6 +4,7 @@ import { discoverAll } from "./platforms/index.js";
 import { scoreBounty } from "./scoring.js";
 import { scanBounty } from "./safety.js";
 import { judgeBounty, medianReward } from "./judge.js";
+import { evaluateGate, resolveAutopilot } from "./autopilot.js";
 import {
   counts,
   getBounty,
@@ -171,6 +172,29 @@ function cmdFresh(flags: Record<string, string | boolean>) {
   console.log(`\n${rows.length} winnable. Act fast: \`build <id>\` before the swarm arrives.`);
 }
 
+function cmdPrecheck(positional: string[], flags: Record<string, string | boolean>) {
+  const id = positional[0];
+  if (!id) return console.error("Usage: precheck <id> [--tests-green]");
+  const b = getBounty(id);
+  if (!b) return console.error(`Not found: ${id}`);
+  const cfg = resolveAutopilot(loadProfile().autopilot);
+  const result = evaluateGate(b, { testsGreen: Boolean(flags["tests-green"]) }, cfg);
+
+  console.log(`\nAuto-submit precheck — ${b.title}`);
+  console.log(`${b.id}  (~${b.rewardUsd != null ? `$${b.rewardUsd}` : "?"}, ${b.quality.tier})`);
+  console.log("-".repeat(60));
+  for (const c of result.checks) {
+    console.log(`  ${c.ok ? "✓" : "✗"} ${c.label.padEnd(22)} ${c.detail}`);
+  }
+  console.log("-".repeat(60));
+  if (result.pass) {
+    console.log("✅ GATE PASSED — eligible for hands-off auto-submit.");
+  } else {
+    const failed = result.checks.filter((c) => !c.ok).map((c) => c.label);
+    console.log(`🚫 GATE BLOCKED — failing: ${failed.join(", ")}. Will NOT auto-submit.`);
+  }
+}
+
 function cmdShow(positional: string[]) {
   const id = positional[0];
   if (!id) return console.error("Usage: show <id>");
@@ -245,6 +269,7 @@ Usage: npm run bounty -- <command> [args]
 Commands:
   discover [--demo] [--only a,b] [--offline]   Fetch + score bounties into the DB
   fresh [--limit n]                            Actionable shortlist: new, uncontested, safe, in-stack
+  precheck <id> [--tests-green]                Evaluate the hands-off auto-submit gate for a bounty
   list [--state s] [--platform p] [--min n] [--limit n]   Ranked table
   show <id>                                    Full detail + score breakdown
   shortlist <id>                               Mark as a target
@@ -263,6 +288,7 @@ async function main() {
   switch (cmd) {
     case "discover": return cmdDiscover(flags);
     case "fresh": return cmdFresh(flags);
+    case "precheck": return cmdPrecheck(positional, flags);
     case "list": return cmdList(flags);
     case "show": return cmdShow(positional);
     case "shortlist": return cmdState(positional, "shortlisted");

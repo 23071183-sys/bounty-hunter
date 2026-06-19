@@ -102,4 +102,23 @@ export interface Profile {
     feasibility: number;
     deadline: number;
   };
+  autopilot?: AutopilotConfig;
+}
+
+/** Preconditions that ALL must hold before a hands-off auto-submit fires. */
+export interface AutopilotConfig {
+  /** Master switch. If false, never auto-submits (draft + manual approve only). */
+  allowAutoSubmit: boolean;
+  /** Minimum escrowed reward to auto-submit. */
+  minRewardUsd: number;
+  /** Require a known (escrowed) reward amount. */
+  requireEscrowed: boolean;
+  /** Require zero prior attempts and no existing claim/PR. */
+  requireUncontested: boolean;
+  /** Require the build's test suite to pass. */
+  requireTestsGreen: boolean;
+  /** Never auto-submit anything carrying safety risk flags. */
+  blockIfRiskFlags: boolean;
+  /** Minimum judge tier to auto-submit. */
+  minQualityTier: QualityTier;
 }

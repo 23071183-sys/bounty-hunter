@@ -32,5 +32,15 @@
     "skillFit": 0.35,
     "feasibility": 0.2,
     "deadline": 0.1
+  },
+  "autopilot": {
+    "_comment": "ALL of these must hold before a hands-off auto-submit fires. Tighten anytime.",
+    "allowAutoSubmit": true,
+    "minRewardUsd": 100,
+    "requireEscrowed": true,
+    "requireUncontested": true,
+    "requireTestsGreen": true,
+    "blockIfRiskFlags": true,
+    "minQualityTier": "fair"
   }
 }
