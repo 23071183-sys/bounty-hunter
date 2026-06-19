@@ -1,0 +1,26 @@
+{
+  "name": "bounty-hunter",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Human-in-the-loop Web3 bounty discovery, scoring, and project-build cockpit",
+  "type": "module",
+  "bin": {
+    "bounty": "./src/cli.ts"
+  },
+  "scripts": {
+    "bounty": "tsx src/cli.ts",
+    "discover": "tsx src/cli.ts discover",
+    "monitor": "tsx src/cli.ts discover --only github && tsx src/cli.ts fresh --new",
+    "list": "tsx src/cli.ts list",
+    "typecheck": "tsc --noEmit",
+    "build": "tsc -p tsconfig.json"
+  },
+  "dependencies": {
+    "dotenv": "^16.4.7"
+  },
+  "devDependencies": {
+    "@types/node": "^22.10.5",
+    "tsx": "^4.19.2",
+    "typescript": "^5.7.3"
+  }
+}

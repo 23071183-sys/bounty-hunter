@@ -1,0 +1,36 @@
+{
+  "_comment": "Your builder profile. Drives skill-fit and feasibility scoring. Edit freely.",
+  "skills": [
+    "typescript",
+    "javascript",
+    "react",
+    "nextjs",
+    "node",
+    "express",
+    "react-native",
+    "expo",
+    "solidity",
+    "tailwind",
+    "api",
+    "frontend",
+    "backend",
+    "documentation"
+  ],
+  "preferredChains": ["ethereum", "optimism", "base", "polygon", "arbitrum"],
+  "minRewardUsd": 50,
+  "maxConcurrentBuilds": 2,
+  "avoid": [
+    "rust",
+    "move",
+    "cairo",
+    "zk-circuits",
+    "kyc-required",
+    "ongoing-maintenance"
+  ],
+  "weights": {
+    "reward": 0.35,
+    "skillFit": 0.35,
+    "feasibility": 0.2,
+    "deadline": 0.1
+  }
+}
