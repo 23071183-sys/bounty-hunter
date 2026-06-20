@@ -48,7 +48,8 @@ export function judgeBounty(b: Bounty & { riskFlags?: string[] }, ctx: JudgeCont
     reasons.push(`${attempts} prior attempt${attempts > 1 ? "s" : ""}`);
   }
 
-  // Payer reputation via repo stars.
+  // Payer reputation via repo stars. Near-zero stars on a paid bounty is a
+  // strong fake/unfunded signal — penalize hard so it can't reach auto-submit.
   const stars = b.repoStars ?? 0;
   if (stars >= 1000) {
     score += 0.25;
@@ -56,7 +57,10 @@ export function judgeBounty(b: Bounty & { riskFlags?: string[] }, ctx: JudgeCont
   } else if (stars >= 100) {
     score += 0.12;
     reasons.push(`established repo (${stars}★)`);
-  } else if (stars < 10) {
+  } else if (stars < 5) {
+    score -= 0.3;
+    reasons.push(`near-zero stars (${stars}★) — payer unproven / likely unfunded`);
+  } else if (stars < 25) {
     score -= 0.15;
     reasons.push(`obscure repo (${stars}★) — payer unproven`);
   }

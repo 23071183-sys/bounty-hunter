@@ -24,9 +24,12 @@ const exec = promisify(execFile);
 // 💎 query is Algora's label and goes first so its results win de-duplication.
 // We pull 2 pages of it to widen the net for high-value bounties.
 const QUERIES: Array<{ q: string; pages: number }> = [
-  { q: 'label:"\u{1F48E} Bounty" is:issue is:open', pages: 2 },
-  { q: 'label:bounty is:issue is:open', pages: 1 },
-  { q: 'label:"\u{1F4B0} Bounty" is:issue is:open', pages: 1 },
+  { q: 'label:"\u{1F48E} Bounty" is:issue is:open archived:false', pages: 2 },
+  { q: 'label:bounty is:issue is:open archived:false', pages: 2 },
+  { q: 'label:"\u{1F4B0} Bounty" is:issue is:open archived:false', pages: 1 },
+  { q: 'label:"\u{1F4B5} Bounty" is:issue is:open archived:false', pages: 1 },
+  { q: 'label:Algora is:issue is:open archived:false', pages: 1 },
+  { q: 'label:"bounty \u{1F48E}" is:issue is:open archived:false', pages: 1 },
 ];
 
 // GitHub labels are user-controlled, so practice/CTF/farm repos abuse bounty
@@ -41,9 +44,10 @@ const DENY_REPO_SUBSTRINGS = [
 ];
 
 const MAX_PER_REPO = 3;
-// Bound the per-issue comment lookups (core API, 5000/hr authed).
-const MAX_ENRICH = 80;
-const ENRICH_CONCURRENCY = 6;
+// Bound per-issue comment lookups. Lower concurrency + capped count avoids
+// GitHub's secondary (anti-burst) rate limit, which silently fails fetches.
+const MAX_ENRICH = 24;
+const ENRICH_CONCURRENCY = 2;
 
 interface GhLabel {
   name: string;
@@ -102,9 +106,12 @@ interface AlgoraInfo {
  * a bounty is realistically winnable.
  */
 async function fetchAlgora(repo: string, number: number): Promise<AlgoraInfo> {
-  // Retry transient gh failures: a silent failure here would mark a contested
-  // bounty as "uncontested", which is the worst possible false positive.
-  for (let tryNo = 0; tryNo < 2; tryNo++) {
+  // Retry transient gh failures (incl. secondary rate limits) with backoff: a
+  // silent failure here would mark a contested bounty as "uncontested", the
+  // worst possible false positive.
+  let lastErr = "unknown";
+  for (let tryNo = 0; tryNo < 3; tryNo++) {
+    if (tryNo > 0) await new Promise((r) => setTimeout(r, 800 * tryNo));
     try {
       const { stdout } = await exec(
         "gh",
@@ -135,10 +142,12 @@ async function fetchAlgora(repo: string, number: number): Promise<AlgoraInfo> {
         }
       }
       return { amount, awarded, attempts: attempters.size, claimed, fetched: true };
-    } catch {
+    } catch (err) {
+      lastErr = (err as Error).message.split("\n")[0];
       // Fall through to retry; on final failure, report contention as UNKNOWN.
     }
   }
+  console.error(`[github] contention fetch failed for ${repo}#${number}: ${lastErr}`);
   return { amount: null, awarded: false, attempts: 0, claimed: false, fetched: false };
 }
 
@@ -241,17 +250,44 @@ export const githubAdapter: PlatformAdapter = {
     }
 
     // 2) Enrich (bounded) with Algora comment data: real $ + award status.
-    const candidates = [...seen.values()];
-    const toEnrich = candidates.slice(0, MAX_ENRICH);
-    const enriched = await mapLimit(toEnrich, ENRICH_CONCURRENCY, async ({ it, repo }) => {
-      const algora = await fetchAlgora(repo, it.number);
-      return { it, repo, algora };
-    });
-    for (let k = MAX_ENRICH; k < candidates.length; k++) {
-      enriched.push({ ...candidates[k], algora: { amount: null, awarded: false, attempts: 0, claimed: false, fetched: false } });
+    //    Pre-rank by how promising each candidate looks from its title+labels
+    //    alone (skill match + a visible $ amount), so the limited enrichment
+    //    budget is spent on candidates that could actually be winnable.
+    const interest = (ctx.interestSkills ?? []).map((s) => s.toLowerCase());
+    const prelim = ({ it }: { it: GhIssue }): number => {
+      const text = `${it.title} ${it.labels.map((l) => l.name).join(" ")}`;
+      // Reward dominates: spend the enrichment budget on the highest-value
+      // bounties first (so a $4k one never loses its slot to a verbose $0 one).
+      const reward = parseDollar(text) ?? 0;
+      const skillHits = interest.filter((s) => text.toLowerCase().includes(s)).length;
+      return Math.min(reward, 10000) / 50 + skillHits;
+    };
+    // Cap per-repo FIRST (before spending any enrichment), so farm repos with
+    // many issues can't crowd out high-value singletons, and the enrichment
+    // budget lands on diverse, valuable candidates.
+    const perRepoPre = new Map<string, number>();
+    const capped: Array<{ it: GhIssue; repo: string }> = [];
+    for (const c of [...seen.values()]) {
+      const n = perRepoPre.get(c.repo) ?? 0;
+      if (n >= MAX_PER_REPO) continue;
+      perRepoPre.set(c.repo, n + 1);
+      capped.push(c);
     }
+    capped.sort((a, b) => prelim(b) - prelim(a));
 
-    // 2b) Per-repo credibility + honeypot signals, one lookup per repo.
+    // Enrich only the top-by-reward candidates (comments + repo metadata). The
+    // long tail stays visible in `list` with contention UNKNOWN (excluded from
+    // `fresh`/auto-submit until a later run promotes + enriches it). Keeps the
+    // per-run gh call budget under GitHub's secondary (anti-burst) rate limit.
+    const NO_ALGORA = { amount: null, awarded: false, attempts: 0, claimed: false, fetched: false };
+    const enriched = await mapLimit(capped.slice(0, MAX_ENRICH), ENRICH_CONCURRENCY, async ({ it, repo }) => ({
+      it,
+      repo,
+      algora: await fetchAlgora(repo, it.number),
+    }));
+    const tail = capped.slice(MAX_ENRICH).map(({ it, repo }) => ({ it, repo, algora: NO_ALGORA }));
+
+    // Per-repo credibility + honeypot signals — only for enriched repos.
     const liveRepos = [...new Set(enriched.filter((e) => !e.algora.awarded).map((e) => e.repo))];
     const repoMetaPairs = await mapLimit(
       liveRepos,
@@ -260,14 +296,10 @@ export const githubAdapter: PlatformAdapter = {
     );
     const repoMetaMap = new Map(repoMetaPairs);
 
-    // 3) Drop already-awarded bounties; map + per-repo cap.
-    const perRepo = new Map<string, number>();
+    // Drop already-awarded bounties; emit the rest (already per-repo capped).
     const out: Bounty[] = [];
-    for (const { it, repo, algora } of enriched) {
+    for (const { it, repo, algora } of [...enriched, ...tail]) {
       if (algora.awarded) continue;
-      const n = perRepo.get(repo) ?? 0;
-      if (n >= MAX_PER_REPO) continue;
-      perRepo.set(repo, n + 1);
 
       const labels = it.labels.map((l) => l.name);
       const body = (it.body ?? "").slice(0, 4000);

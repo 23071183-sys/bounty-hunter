@@ -58,7 +58,10 @@ async function cmdDiscover(flags: Record<string, string | boolean>) {
   const offline = Boolean(flags.offline);
 
   console.log(demo ? "Discovering (demo fixtures)…" : "Discovering live bounties…");
-  const { byPlatform, bounties } = await discoverAll({ env, offline }, { only, demo });
+  const { byPlatform, bounties } = await discoverAll(
+    { env, offline, interestSkills: profile.skills },
+    { only, demo },
+  );
 
   const median = medianReward(bounties);
   const scored = bounties.map((b) => {

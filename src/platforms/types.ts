@@ -5,6 +5,8 @@ export interface FetchContext {
   env: Env;
   /** Skip live network and return [] (used for dry runs / offline). */
   offline: boolean;
+  /** Profile skills — lets adapters spend expensive enrichment only on promising candidates. */
+  interestSkills?: string[];
 }
 
 export interface PlatformAdapter {
@@ -27,6 +29,11 @@ export const SKILL_KEYWORDS = [
   "web3", "ethers", "wagmi", "viem", "hardhat", "foundry", "subgraph",
   "documentation", "docs", "design", "ui", "ux", "figma", "testing", "tests",
   "zk", "defi", "nft", "dao", "indexer", "sdk", "cli", "bot", "discord",
+  // Broadened: mainstream languages/frameworks the build agent handles well.
+  "java", "kotlin", "php", "ruby", "rails", "vue", "svelte", "angular",
+  "sql", "postgres", "postgresql", "mysql", "mongodb", "redis", "prisma",
+  "docker", "kubernetes", "rest", "fastapi", "django", "flask", "laravel",
+  "spring", "tauri", "electron", "websocket", "webhook", "auth", "oauth",
 ];
 
 /** Extract lowercased skill keywords from arbitrary text + tags. */
