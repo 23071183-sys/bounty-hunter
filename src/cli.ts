@@ -146,11 +146,14 @@ function cmdList(flags: Record<string, string | boolean>) {
 function cmdFresh(flags: Record<string, string | boolean>) {
   const limit = typeof flags.limit === "string" ? Number(flags.limit) : 25;
   const newOnly = Boolean(flags.new);
-  // The actionable shortlist: safe (no trap flags), uncontested (no
-  // attempts/claims), and in your stack (has matched skills). With --new, only
-  // bounties first seen in the latest discovery run (never re-seen since).
+  const profile = loadProfile();
+  // The actionable shortlist: safe (no trap flags), uncontested, in your stack
+  // (matched skills, none on the avoid list), worth it (reward >= your floor),
+  // and not avoid-tier. With --new, only bounties first seen in the latest run.
   const rows = listBounties({ state: "new", safeOnly: true, uncontestedOnly: true, limit: 200 })
     .filter((b) => b.scoreBreakdown.matchedSkills.length > 0)
+    .filter((b) => b.scoreBreakdown.avoidHits.length === 0)
+    .filter((b) => b.rewardUsd == null || b.rewardUsd >= profile.minRewardUsd)
     .filter((b) => b.quality.tier !== "avoid")
     .filter((b) => !newOnly || b.firstSeen === b.lastSeen)
     .slice(0, limit);

@@ -186,9 +186,16 @@ async function fetchRepoMeta(repo: string): Promise<RepoMeta> {
 }
 
 async function runQuery(q: string, page: number): Promise<GhIssue[]> {
+  // Sort newest-first: the "be first" edge depends on seeing freshly-posted
+  // bounties before they get contested, not the highest-relevance ones.
   const { stdout } = await exec(
     "gh",
-    ["api", "-X", "GET", "search/issues", "-f", `q=${q}`, "-F", "per_page=50", "-F", `page=${page}`],
+    [
+      "api", "-X", "GET", "search/issues",
+      "-f", `q=${q}`,
+      "-F", "sort=created", "-F", "order=desc",
+      "-F", "per_page=50", "-F", `page=${page}`,
+    ],
     { maxBuffer: 10 * 1024 * 1024 },
   );
   const json = JSON.parse(stdout) as { items?: GhIssue[] };
