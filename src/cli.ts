@@ -5,14 +5,20 @@ import { scoreBounty } from "./scoring.js";
 import { scanBounty } from "./safety.js";
 import { judgeBounty, medianReward } from "./judge.js";
 import { evaluateGate, resolveAutopilot } from "./autopilot.js";
+import { readFileSync } from "node:fs";
+import { join } from "node:path";
 import {
   counts,
   getBounty,
+  inFlight,
+  lastDiscovery,
   listBounties,
   setState,
   upsertBounties,
   type ListOptions,
 } from "./db.js";
+import { ROOT } from "./config.js";
+import type { Profile, ScoredBounty } from "./types.js";
 import { buildProject } from "./build.js";
 import type { LocalState } from "./types.js";
 
@@ -143,20 +149,25 @@ function cmdList(flags: Record<string, string | boolean>) {
   console.log(`\n${rows.length} shown. Inspect: \`npm run bounty -- show <id>\``);
 }
 
-function cmdFresh(flags: Record<string, string | boolean>) {
-  const limit = typeof flags.limit === "string" ? Number(flags.limit) : 25;
-  const newOnly = Boolean(flags.new);
-  const profile = loadProfile();
-  // The actionable shortlist: safe (no trap flags), uncontested, in your stack
-  // (matched skills, none on the avoid list), worth it (reward >= your floor),
-  // and not avoid-tier. With --new, only bounties first seen in the latest run.
-  const rows = listBounties({ state: "new", safeOnly: true, uncontestedOnly: true, limit: 200 })
+/**
+ * The actionable shortlist: new, safe (no trap flags), uncontested, in your
+ * stack (matched skills, none on the avoid list), worth it (reward >= floor),
+ * and not avoid-tier. With newOnly, only bounties first seen in the latest run.
+ */
+function winnableBounties(profile: Profile, newOnly = false): ScoredBounty[] {
+  return listBounties({ state: "new", safeOnly: true, uncontestedOnly: true, limit: 200 })
     .filter((b) => b.scoreBreakdown.matchedSkills.length > 0)
     .filter((b) => b.scoreBreakdown.avoidHits.length === 0)
     .filter((b) => b.rewardUsd == null || b.rewardUsd >= profile.minRewardUsd)
     .filter((b) => b.quality.tier !== "avoid")
-    .filter((b) => !newOnly || b.firstSeen === b.lastSeen)
-    .slice(0, limit);
+    .filter((b) => !newOnly || b.firstSeen === b.lastSeen);
+}
+
+function cmdFresh(flags: Record<string, string | boolean>) {
+  const limit = typeof flags.limit === "string" ? Number(flags.limit) : 25;
+  const newOnly = Boolean(flags.new);
+  const profile = loadProfile();
+  const rows = winnableBounties(profile, newOnly).slice(0, limit);
 
   if (rows.length === 0) {
     console.log("No fresh, uncontested, in-stack bounties right now.");
@@ -264,6 +275,84 @@ function cmdStatus() {
   for (const s of VALID_STATES) console.log(`  ${s.padEnd(12)} ${c[s] ?? 0}`);
 }
 
+function timeAgo(iso: string | null): string {
+  if (!iso) return "never";
+  const ms = Date.now() - new Date(iso).getTime();
+  if (Number.isNaN(ms)) return "?";
+  const m = Math.floor(ms / 60000);
+  if (m < 1) return "just now";
+  if (m < 60) return `${m}m ago`;
+  const h = Math.floor(m / 60);
+  if (h < 24) return `${h}h ago`;
+  return `${Math.floor(h / 24)}d ago`;
+}
+
+function tailLog(n: number): string[] {
+  try {
+    const txt = readFileSync(join(ROOT, "data", "monitor.log"), "utf8");
+    return txt.split("\n").filter((l) => l.trim()).slice(-n);
+  } catch {
+    return [];
+  }
+}
+
+function renderDashboard(): void {
+  const profile = loadProfile();
+  const env = loadEnv();
+  const c = counts();
+  const flight = inFlight();
+  const win = winnableBounties(profile);
+  const wallet = env.payoutWallet
+    ? `${env.payoutWallet.slice(0, 6)}…${env.payoutWallet.slice(-4)}`
+    : "(unset)";
+  const line = "─".repeat(62);
+
+  console.log(`╭${line}╮`);
+  console.log(` 🎯 BOUNTY AUTOPILOT`);
+  console.log(`    payout ${wallet} · last discovery ${timeAgo(lastDiscovery())}`);
+  console.log(`╰${line}╯`);
+
+  console.log("\n PIPELINE");
+  const order = ["new", "shortlisted", "building", "submitted", "won", "rejected", "ignored"];
+  console.log("   " + order.map((s) => `${s}:${c[s] ?? 0}`).join("   "));
+
+  console.log(`\n 🎯 WINNABLE NOW: ${win.length}`);
+  for (const b of win.slice(0, 5)) {
+    console.log(`   ${fmtUsd(b.rewardUsd)}  ${b.quality.tier.padEnd(6)} ${b.title.slice(0, 44)}`);
+    console.log(`        ${b.id}`);
+  }
+
+  if (flight.length) {
+    console.log("\n 🛠  IN FLIGHT (building / submitted / won)");
+    for (const b of flight) {
+      console.log(`   ${b.state.padEnd(10)} ${fmtUsd(b.rewardUsd)}  ${b.title.slice(0, 40)}`);
+      console.log(`        ${b.url}`);
+    }
+  }
+
+  const log = tailLog(6);
+  if (log.length) {
+    console.log("\n 📜 RECENT ACTIVITY (data/monitor.log)");
+    for (const l of log) console.log(`   ${l.slice(0, 74)}`);
+  }
+  console.log("");
+}
+
+const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
+
+async function cmdDashboard(flags: Record<string, string | boolean>): Promise<void> {
+  const watch = flags.watch !== undefined;
+  const secs = typeof flags.watch === "string" ? Math.max(2, Number(flags.watch)) : 15;
+  do {
+    if (watch) process.stdout.write("\x1b[2J\x1b[H");
+    renderDashboard();
+    if (watch) {
+      console.log(` ↻ refreshing every ${secs}s — Ctrl+C to exit`);
+      await sleep(secs * 1000);
+    }
+  } while (watch);
+}
+
 function help() {
   console.log(`bounty — Web3 bounty cockpit (human-in-the-loop)
 
@@ -279,6 +368,7 @@ Commands:
   ignore <id>                                  Hide from default views
   state <id> <state>                           Set lifecycle state
   build <id> [--push]                          Scaffold a project for the bounty
+  dashboard [--watch [secs]]                   Live status board (running + progress)
   status                                       Config + pipeline counts
   help                                         This message
 
@@ -298,6 +388,7 @@ async function main() {
     case "ignore": return cmdState(positional, "ignored");
     case "state": return cmdSetState(positional);
     case "build": return cmdBuild(positional, flags);
+    case "dashboard": case "dash": return cmdDashboard(flags);
     case "status": return cmdStatus();
     case "help": case undefined: return help();
     default:

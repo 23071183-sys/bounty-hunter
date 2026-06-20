@@ -257,4 +257,18 @@ export function counts(): Record<string, number> {
   return out;
 }
 
+/** Most recent `last_seen` across all bounties = time of the last discovery. */
+export function lastDiscovery(): string | null {
+  const r = db.prepare("SELECT MAX(last_seen) AS t FROM bounties").get() as { t: string | null } | undefined;
+  return r?.t ?? null;
+}
+
+/** Bounties the autopilot is actively working or has submitted. */
+export function inFlight(): ScoredBounty[] {
+  const rows = db
+    .prepare("SELECT * FROM bounties WHERE state IN ('building','submitted','won') ORDER BY score DESC")
+    .all() as unknown as Row[];
+  return rows.map(rowToScored);
+}
+
 export default db;

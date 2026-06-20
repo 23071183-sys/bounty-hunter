@@ -11,6 +11,7 @@
     "bounty": "tsx src/cli.ts",
     "discover": "tsx src/cli.ts discover",
     "monitor": "tsx src/cli.ts discover --only github && tsx src/cli.ts fresh --new",
+    "dash": "tsx src/cli.ts dashboard --watch 15",
     "list": "tsx src/cli.ts list",
     "typecheck": "tsc --noEmit",
     "build": "tsc -p tsconfig.json"
